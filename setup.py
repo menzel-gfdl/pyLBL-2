@@ -1,20 +1,9 @@
 from setuptools import Extension, setup
 
 
-def c_gas_optics_lib():
-    """Defines c extension library."""
-    directory = "pyLBL/c_lib"
-    src = ["{}/{}".format(directory, x) for x in
-           ["absorption.c", "spectra.c", "spectral_database.c", "voigt.c"]]
-    return Extension("pyLBL.c_lib.libabsorption",
-                     sources=src,
-                     include_dirs=[directory,],
-                     extra_compile_args=[],
-                     extra_link_args=["-lsqlite3", "-lm"])
-
-
 # Required dependencies.
 install_requires = [
+    "cuda_python",
     "netCDF4",
     "numpy",
     "scipy",
@@ -82,6 +71,5 @@ setup(
     install_requires=install_requires,
     extras_require=extras_require,
     entry_points=entry_points,
-    ext_modules=[c_gas_optics_lib(), ],
     package_data={"": ["*.nc"], },
 )
