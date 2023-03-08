@@ -1,12 +1,31 @@
 #define M_PI 3.14159265358979323846  /* pi */
 
 
+#if __CUDA_ARCH__ < 600
+/*Atomic add for doubles must be defined for some older GPUs.*/
+__device__ static double atomicAdd(double * address, /*Address to add value to.*/
+                                   double val /*Value to add.*/
+                                  )
+{
+    unsigned long long int * address_as_ull = (unsigned long long int *)address;
+    unsigned long long int old = *address_as_ull;
+    unsigned long long int assumed;
+    do {
+        assumed = old;
+        old = atomicCAS(address_as_ull, assumed,
+                        __double_as_longlong(val + __longlong_as_double(assumed)));
+    } while (assumed != old);
+    return __longlong_as_double(old);
+}
+#endif
+
+
 /*Calculate total partition function.*/
 __device__ double total_partition_function(int tips_num_t, double * tips_temperature,
                                            double * tips_data, double temperature, int iso)
 {
     int i = iso*tips_num_t;
-    double * t = tips_temperature + i; /*Pointer arithmetic.*/
+    double * t = tips_temperature;
     double * data = tips_data + i; /*Pointer arithemtic.*/
     i = (int)(floor(temperature)) - (int)(t[0]);
     return data[i] + (data[i+1] - data[i])*(temperature - t[i])/(t[i+1] - t[i]);
@@ -15,7 +34,7 @@ __device__ double total_partition_function(int tips_num_t, double * tips_tempera
 
 /* Calculates a voigt profile.*/
 __device__ void voigt(double * dwno, int start, int end, double nu, double alpha,
-                      double gamma, double sw, double * k)
+                      double gamma, double sw, double * k, double * pedestal)
 {
     double rsqrpi = 1./sqrt(M_PI);
     double sqrln2 = sqrt(log(2.));
@@ -27,14 +46,25 @@ __device__ void voigt(double * dwno, int start, int end, double nu, double alpha
     double y = repwid*gamma;
     double yq = y*y;
 
+    *pedestal = 0.;
     if (y >= 70.55)
     {
         /*region 0.*/
+        double kval = 0.;
         int i;
         for (i=start; i<=end; ++i)
         {
             double xi = (dwno[i] - nu)*repwid;
-            k[i] += sw*repwid*y/(M_PI*(xi*xi + yq));
+            kval = sw*repwid*y/(M_PI*(xi*xi + yq));
+            atomicAdd(&(k[i]), kval);
+            if (i == start)
+            {
+                *pedestal = kval;
+            }
+        }
+        if (kval < *pedestal)
+        {
+            *pedestal = kval;
         }
         return;
     }
@@ -83,6 +113,7 @@ __device__ void voigt(double * dwno, int start, int end, double nu, double alpha
     double mf[6];
     double pf[6];
 
+    double kval = 0.;
     int i;
     for (i=start; i<=end; ++i)
     {
@@ -198,7 +229,16 @@ __device__ void voigt(double * dwno, int start, int end, double nu, double alpha
                 buf = y*buf + exp(-xq);
             }
         }
-        k[i] += sw*rsqrpi*repwid*buf;
+        kval = sw*rsqrpi*repwid*buf;
+        atomicAdd(&(k[i]), kval);
+        if (i == start)
+        {
+            *pedestal = kval;
+        }
+    }
+    if (kval < *pedestal)
+    {
+        *pedestal = kval;
     }
     return;
 }
@@ -208,7 +248,7 @@ __device__ void voigt(double * dwno, int start, int end, double nu, double alpha
 __device__ void spectra(double temperature, double pressure, double abundance,
                         double * v, int n, int n_per_v, double nu, double delta_air,
                         double gamma_air, double gamma_self, double n_air, double mass,
-                        double elower, double local_iso_id, double sw,
+                        double elower, int local_iso_id, double sw,
                         int tips_num_t, double * tips_temperature, double * tips_data,
                         double * k, int cut_off, int remove_pedestal)
 {
@@ -231,7 +271,7 @@ __device__ void spectra(double temperature, double pressure, double abundance,
     /*Calculate Doppler half-width at half-max HWHM in cm-1.*/
     double alpha = (nu/vlight)*sqrt(r2*temperature/mass);
 
-    /*Convert for line strength in cm-1.(mol.cm-2)-1 at 296K.*/
+    /*Convert for line strength in cm-1 (mol cm-2)-1 at 296K.*/
     /*Boltzman factor for lower state energy.*/
     double sb = exp(elower*c2*(temperature - 296.)/(temperature*296.));
 
@@ -241,10 +281,9 @@ __device__ void spectra(double temperature, double pressure, double abundance,
     double se = (1. - g)/(1. - gref);
 
     /*Nonlte calculation of absorption coefficient modifiers.*/
-    double sq = total_partition_function(tips_num_t, tips_temperature, tips_data,
-                                         296., (int)local_iso_id - 1)/
-                total_partition_function(tips_num_t, tips_temperature, tips_data,
-                                         temperature, (int)local_iso_id - 1);
+    int iso = local_iso_id - 1;
+    double sq = total_partition_function(tips_num_t, tips_temperature, tips_data, 296., iso)/
+                total_partition_function(tips_num_t, tips_temperature, tips_data, temperature, iso);
 
     /*Line strength.*/
     double sw_ = sw*sb*se*sq*0.01*0.01;
@@ -260,25 +299,22 @@ __device__ void spectra(double temperature, double pressure, double abundance,
     {
         s = 0;
     }
-    int e = (floor(nu_) + cut_off + 1 - v[0])*n_per_v;
+    int e = s + (2*cut_off + 1)*n_per_v;
     if (e >= n)
     {
         e = n - 1;
     }
 
     /*Calculate absorption coefficient*/
-    voigt(v, s, e, nu_, alpha, gamma, sw_, k);
+    double pedestal;
+    voigt(v, s, e, nu_, alpha, gamma, sw_, k, &pedestal);
+
     if (remove_pedestal != 0)
     {
-        double pedestal = k[s];
-        if (k[e] < k[s])
-        {
-            pedestal = k[e];
-        }
         int i;
         for (i=s; i<=e; ++i)
         {
-            k[i] -= pedestal;
+            atomicAdd(&(k[i]), -1.*pedestal);
         }
     }
     return;
@@ -287,19 +323,22 @@ __device__ void spectra(double temperature, double pressure, double abundance,
 
 extern "C" __global__ void calc_absorption(double * nu, double * sw, double * gamma_air,
                                            double * gamma_self, double * n_air, double * elower,
-                                           double * delta_air, double * local_iso_id, double * mass,
+                                           double * delta_air, int * local_iso_id, double * mass,
                                            int num_lines, int tips_num_t, double * tips_temperature,
                                            double * tips_data, double temperature, double pressure,
                                            double volume_mixing_ratio, double * v, int n, int n_per_v,
                                            double * k, int cut_off, int remove_pedestal)
 {
     unsigned int i = blockIdx.x*blockDim.x + threadIdx.x;
-    if (i < num_lines && (nu[i] <= v[n-1] + cut_off + 1 || nu[i] >= v[0] - (cut_off + 1)))
+    if (i < num_lines)
     {
-        spectra(temperature, pressure, volume_mixing_ratio, v, n, n_per_v, nu[i],
-                delta_air[i], gamma_air[i], gamma_self[i], n_air[i], mass[i],
-                elower[i], local_iso_id[i], sw[i], tips_num_t, tips_temperature, tips_data,
-                k, cut_off, remove_pedestal);
+        if (nu[i] <= v[n-1] + cut_off + 1 || nu[i] >= v[0] - (cut_off + 1))
+        {
+            spectra(temperature, pressure, volume_mixing_ratio, v, n, n_per_v, nu[i],
+                    delta_air[i], gamma_air[i], gamma_self[i], n_air[i], mass[i],
+                    elower[i], local_iso_id[i], sw[i], tips_num_t, tips_temperature, tips_data,
+                    k, cut_off, remove_pedestal);
+        }
     }
     return;
 }

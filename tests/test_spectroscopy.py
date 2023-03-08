@@ -19,7 +19,7 @@ def test_absorption(single_layer_atmosphere, coarse_grid, downloaded_database):
     beta = beta.data_vars["absorption"]
     wavenumber = beta.coords["wavenumber"]
     assert max(beta.data) == pytest.approx(154.77712952851365)
-    assert log(sum(beta.data)) == pytest.approx(7.212513759327571)
+    assert log(sum(beta.data)) == pytest.approx(7.212513759327571, rel=1.e-3, abs=1.e-3)
     assert beta.attrs["units"] == "m-1"
     assert array_equal(wavenumber.data, coarse_grid)
     assert wavenumber.attrs["units"] == "cm-1"

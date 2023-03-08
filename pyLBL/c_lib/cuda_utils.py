@@ -24,7 +24,7 @@ minor_cc_version = cudaDeviceAttr.cudaDevAttrComputeCapabilityMinor
 
 def cuda_error_string(error):
     """Returns a string describing which CUDA error has occurred."""
-    return error_function[type(error)](error)[1]
+    return error_function[type(error)](error)[1].decode("utf-8")
 
 
 def cuda_error_check(result):
@@ -39,6 +39,7 @@ class GpuDevice(object):
     def __init__(self, device_id):
         self.device_id = device_id
         cuda_error_check(cudaFree(0))  # Initialize cuda.
+        self.activate()
         self.major_cc = cuda_error_check(cudaDeviceGetAttribute(major_cc_version, device_id))[0]
         self.minor_cc = cuda_error_check(cudaDeviceGetAttribute(minor_cc_version, device_id))[0]
         self.use_cubin = cuda_error_check(nvrtcVersion())[1] >= 1
